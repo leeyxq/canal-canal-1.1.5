@@ -4,12 +4,16 @@ import com.alibaba.otter.canal.instance.core.CanalInstance;
 import com.alibaba.otter.canal.prometheus.impl.PrometheusClientInstanceProfiler;
 import com.alibaba.otter.canal.server.netty.ClientInstanceProfiler;
 import com.alibaba.otter.canal.spi.CanalMetricsService;
+import com.sun.net.httpserver.HttpServer;
 import io.prometheus.client.exporter.HTTPServer;
 import io.prometheus.client.hotspot.DefaultExports;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.util.ReflectionUtils;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 
 import static com.alibaba.otter.canal.server.netty.CanalServerWithNettyProfiler.NOP;
 import static com.alibaba.otter.canal.server.netty.CanalServerWithNettyProfiler.profiler;
@@ -19,11 +23,11 @@ import static com.alibaba.otter.canal.server.netty.CanalServerWithNettyProfiler.
  */
 public class PrometheusService implements CanalMetricsService {
 
-    private static final Logger          logger          = LoggerFactory.getLogger(PrometheusService.class);
-    private final CanalInstanceExports   instanceExports;
-    private volatile boolean             running         = false;
-    private int                          port;
-    private HTTPServer                   server;
+    private static final Logger logger = LoggerFactory.getLogger(PrometheusService.class);
+    private final CanalInstanceExports instanceExports;
+    private volatile boolean running = false;
+    private int port;
+    private HTTPServer server;
     private final ClientInstanceProfiler clientProfiler;
 
     private PrometheusService() {
@@ -45,6 +49,8 @@ public class PrometheusService implements CanalMetricsService {
             logger.info("Start prometheus HTTPServer on port {}.", port);
             //TODO 2.Https?
             server = new HTTPServer(port);
+            addHealthCheckApi(server);
+
         } catch (IOException e) {
             logger.warn("Unable to start prometheus HTTPServer.", e);
             return;
@@ -62,6 +68,31 @@ public class PrometheusService implements CanalMetricsService {
         }
 
         running = true;
+    }
+
+    /**
+     * 添加健康检查api
+     *
+     * @param server
+     */
+    private void addHealthCheckApi(HTTPServer server) {
+        logger.info("add health check api: http://127.0.0.1:{}/health", port);
+        try {
+            Field serverField = ReflectionUtils.findField(HTTPServer.class, "server");
+            ReflectionUtils.makeAccessible(serverField);
+            HttpServer httpServer = (HttpServer) ReflectionUtils.getField(serverField, server);
+            httpServer.createContext("/health", t -> {
+                byte[] text = "{\"status\":200}".getBytes(StandardCharsets.UTF_8);
+                t.getResponseHeaders().set("Content-Type", "application/json;charset=UTF-8");
+                t.getResponseHeaders().set("Content-Length", String.valueOf(text.length));
+                t.sendResponseHeaders(200, text.length);
+                t.getResponseBody().write(text);
+                t.close();
+            });
+        } catch (Exception ex) {
+            logger.error("addHealthCheckApi err", ex);
+        }
+
     }
 
     @Override
@@ -117,5 +148,6 @@ public class PrometheusService implements CanalMetricsService {
     public void setServerPort(int port) {
         this.port = port;
     }
+
 
 }
