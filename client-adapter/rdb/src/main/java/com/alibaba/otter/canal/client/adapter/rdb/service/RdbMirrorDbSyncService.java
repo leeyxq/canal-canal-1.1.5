@@ -1,24 +1,23 @@
 package com.alibaba.otter.canal.client.adapter.rdb.service;
 
-import java.sql.Connection;
-import java.sql.Statement;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-
-import javax.sql.DataSource;
-
-import org.apache.commons.lang.StringUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.alibaba.otter.canal.client.adapter.rdb.config.MappingConfig;
 import com.alibaba.otter.canal.client.adapter.rdb.config.MirrorDbConfig;
 import com.alibaba.otter.canal.client.adapter.rdb.support.SingleDml;
 import com.alibaba.otter.canal.client.adapter.support.Dml;
+import org.apache.commons.lang.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.Statement;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 
 /**
  * RDB镜像库同步操作业务
@@ -28,15 +27,15 @@ import com.alibaba.otter.canal.client.adapter.support.Dml;
  */
 public class RdbMirrorDbSyncService {
 
-    private static final Logger         logger = LoggerFactory.getLogger(RdbMirrorDbSyncService.class);
+    private static final Logger logger = LoggerFactory.getLogger(RdbMirrorDbSyncService.class);
 
     private Map<String, MirrorDbConfig> mirrorDbConfigCache;                                           // 镜像库配置
-    private DataSource                  dataSource;
-    private RdbSyncService              rdbSyncService;                                                // rdbSyncService代理
+    private DataSource dataSource;
+    private RdbSyncService rdbSyncService;                                                // rdbSyncService代理
 
     public RdbMirrorDbSyncService(Map<String, MirrorDbConfig> mirrorDbConfigCache, DataSource dataSource,
                                   Integer threads, Map<String, Map<String, Integer>> columnsTypeCache,
-                                  boolean skipDupException){
+                                  boolean skipDupException) {
         this.mirrorDbConfigCache = mirrorDbConfigCache;
         this.dataSource = dataSource;
         this.rdbSyncService = new RdbSyncService(dataSource, threads, columnsTypeCache, skipDupException);
@@ -48,7 +47,6 @@ public class RdbMirrorDbSyncService {
      * @param dmls 批量 DML
      */
     public void sync(List<Dml> dmls) {
-        List<Dml> dmlList = new ArrayList<>();
         for (Dml dml : dmls) {
             String destination = StringUtils.trimToEmpty(dml.getDestination());
             String database = dml.getDatabase();
@@ -76,49 +74,50 @@ public class RdbMirrorDbSyncService {
             } else {
                 // DML
                 initMappingConfig(dml.getTable(), mirrorDbConfig.getMappingConfig(), mirrorDbConfig, dml);
-                dmlList.add(dml);
+                // 改为ddl和dml按顺序执行 update by lixq
+                rdbSyncService.sync(Collections.singletonList(dml), canExecuteDmlFn);
             }
         }
-        if (!dmlList.isEmpty()) {
-            rdbSyncService.sync(dmlList, dml -> {
-                MirrorDbConfig mirrorDbConfig = mirrorDbConfigCache.get(dml.getDestination() + "." + dml.getDatabase());
-                if (mirrorDbConfig == null) {
-                    return false;
-                }
-                String table = dml.getTable();
-                MappingConfig config = mirrorDbConfig.getTableConfig().get(table);
+    }
 
-                if (config == null) {
-                    return false;
-                }
-                // 是否区分大小写
-                boolean caseInsensitive = config.getDbMapping().isCaseInsensitive();
-                if (config.getConcurrent()) {
-                    List<SingleDml> singleDmls = SingleDml.dml2SingleDmls(dml, caseInsensitive);
-                    singleDmls.forEach(singleDml -> {
-                        int hash = rdbSyncService.pkHash(config.getDbMapping(), singleDml.getData());
-                        RdbSyncService.SyncItem syncItem = new RdbSyncService.SyncItem(config, singleDml);
-                        rdbSyncService.getDmlsPartition()[hash].add(syncItem);
-                    });
-                } else {
-                    int hash = 0;
-                    List<SingleDml> singleDmls = SingleDml.dml2SingleDmls(dml, caseInsensitive);
-                    singleDmls.forEach(singleDml -> {
-                        RdbSyncService.SyncItem syncItem = new RdbSyncService.SyncItem(config, singleDml);
-                        rdbSyncService.getDmlsPartition()[hash].add(syncItem);
-                    });
-                }
-                return true;
+    Function<Dml, Boolean> canExecuteDmlFn = dml -> {
+        MirrorDbConfig mirrorDbConfig = mirrorDbConfigCache.get(dml.getDestination() + "." + dml.getDatabase());
+        if (mirrorDbConfig == null) {
+            return false;
+        }
+        String table = dml.getTable();
+        MappingConfig config = mirrorDbConfig.getTableConfig().get(table);
+
+        if (config == null) {
+            return false;
+        }
+        // 是否区分大小写
+        boolean caseInsensitive = config.getDbMapping().isCaseInsensitive();
+        if (config.getConcurrent()) {
+            List<SingleDml> singleDmls = SingleDml.dml2SingleDmls(dml, caseInsensitive);
+            singleDmls.forEach(singleDml -> {
+                int hash = rdbSyncService.pkHash(config.getDbMapping(), singleDml.getData());
+                RdbSyncService.SyncItem syncItem = new RdbSyncService.SyncItem(config, singleDml);
+                rdbSyncService.getDmlsPartition()[hash].add(syncItem);
+            });
+        } else {
+            int hash = 0;
+            List<SingleDml> singleDmls = SingleDml.dml2SingleDmls(dml, caseInsensitive);
+            singleDmls.forEach(singleDml -> {
+                RdbSyncService.SyncItem syncItem = new RdbSyncService.SyncItem(config, singleDml);
+                rdbSyncService.getDmlsPartition()[hash].add(syncItem);
             });
         }
-    }
+        return true;
+    };
+
 
     /**
      * 初始化表配置
      *
-     * @param key 配置key: destination.database.table
+     * @param key           配置key: destination.database.table
      * @param baseConfigMap db sync config
-     * @param dml DML
+     * @param dml           DML
      */
     private void initMappingConfig(String key, MappingConfig baseConfigMap, MirrorDbConfig mirrorDbConfig, Dml dml) {
         MappingConfig mappingConfig = mirrorDbConfig.getTableConfig().get(key);
