@@ -13,7 +13,7 @@ import org.slf4j.LoggerFactory;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.Statement;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,15 +27,15 @@ import java.util.function.Function;
  */
 public class RdbMirrorDbSyncService {
 
-    private static final Logger logger = LoggerFactory.getLogger(RdbMirrorDbSyncService.class);
+    private static final Logger         logger = LoggerFactory.getLogger(RdbMirrorDbSyncService.class);
 
     private Map<String, MirrorDbConfig> mirrorDbConfigCache;                                           // 镜像库配置
-    private DataSource dataSource;
-    private RdbSyncService rdbSyncService;                                                // rdbSyncService代理
+    private DataSource                  dataSource;
+    private RdbSyncService              rdbSyncService;                                                // rdbSyncService代理
 
     public RdbMirrorDbSyncService(Map<String, MirrorDbConfig> mirrorDbConfigCache, DataSource dataSource,
                                   Integer threads, Map<String, Map<String, Integer>> columnsTypeCache,
-                                  boolean skipDupException) {
+                                  boolean skipDupException){
         this.mirrorDbConfigCache = mirrorDbConfigCache;
         this.dataSource = dataSource;
         this.rdbSyncService = new RdbSyncService(dataSource, threads, columnsTypeCache, skipDupException);
@@ -47,6 +47,7 @@ public class RdbMirrorDbSyncService {
      * @param dmls 批量 DML
      */
     public void sync(List<Dml> dmls) {
+        List<Dml> dmlList = new ArrayList<>();
         for (Dml dml : dmls) {
             String destination = StringUtils.trimToEmpty(dml.getDestination());
             String database = dml.getDatabase();
@@ -64,6 +65,11 @@ public class RdbMirrorDbSyncService {
             }
 
             if (dml.getIsDdl() != null && dml.getIsDdl() && StringUtils.isNotEmpty(dml.getSql())) {
+                // 改为ddl和dml按顺序执行  update by lixq
+                if (!dmlList.isEmpty()) {
+                    rdbSyncService.sync(dmlList, canExecuteDmlFn);
+                    dmlList.clear();
+                }
                 // DDL
                 if (logger.isDebugEnabled()) {
                     logger.debug("DDL: {}", JSON.toJSONString(dml, SerializerFeature.WriteMapNullValue));
@@ -74,9 +80,11 @@ public class RdbMirrorDbSyncService {
             } else {
                 // DML
                 initMappingConfig(dml.getTable(), mirrorDbConfig.getMappingConfig(), mirrorDbConfig, dml);
-                // 改为ddl和dml按顺序执行 update by lixq
-                rdbSyncService.sync(Collections.singletonList(dml), canExecuteDmlFn);
+                dmlList.add(dml);
             }
+        }
+        if (!dmlList.isEmpty()) {
+            rdbSyncService.sync(dmlList, canExecuteDmlFn);
         }
     }
 
